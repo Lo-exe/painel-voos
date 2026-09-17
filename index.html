@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Painel de Voos — SN-2026</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  header {
+    max-width: 1000px;
+    margin: 0 auto 24px auto;
+  }
+  h1 { margin: 0 0 4px 0; font-size: 1.5rem; }
+  p.subtitle { color: var(--muted); margin: 0; }
+  .controls {
+    max-width: 1000px;
+    margin: 0 auto 16px auto;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  select, button {
+    background: var(--card);
+    color: var(--text);
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 0.9rem;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  #status { max-width: 1000px; margin: 0 auto 16px auto; color: var(--muted); font-size: 0.85rem; }
+  table {
+    max-width: 1000px;
+    margin: 0 auto;
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  th, td {
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 1px solid #334155;
+    font-size: 0.9rem;
+  }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 0.75rem; }
+  tr:last-child td { border-bottom: none; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+  .badge.ok { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
+  .badge.warn { background: rgba(251, 191, 36, 0.15); color: var(--warn); }
+  .empty { text-align: center; color: var(--muted); padding: 32px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Painel de Voos</h1>
+    <p class="subtitle">Dados coletados da API SIROS/ANAC e armazenados no Supabase</p>
+  </header>
+
+  <div class="controls">
+    <select id="airportFilter">
+      <option value="">Todos os aeroportos</option>
+    </select>
+    <button id="refreshButton">Atualizar</button>
+  </div>
+
+  <div id="status">Carregando...</div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Voo</th>
+        <th>Cia</th>
+        <th>Origem</th>
+        <th>Destino</th>
+        <th>Status</th>
+        <th>Aeronave</th>
+      </tr>
+    </thead>
+    <tbody id="flightsBody"></tbody>
+  </table>
+
+  <script>
+    // ------------------------------------------------------------
+    // Configuração — chave pública (anon key), segura para o browser
+    // porque a tabela `flights` só permite SELECT para o papel anon
+    // (ver Row Level Security em sql/setup.sql)
+    // ------------------------------------------------------------
+    const SUPABASE_URL = "https://yrzrmseokymaokcnuzlb.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlyenJtc2Vva3ltYW9rY251emxiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE1MDI1OTEsImV4cCI6MjA5NzA3ODU5MX0.HlORRsZehXnwOWZKsUof3eA2ImGLa2esbOgPZXS6vWQ";
+
+    const statusEl = document.getElementById("status");
+    const bodyEl = document.getElementById("flightsBody");
+    const filterEl = document.getElementById("airportFilter");
+    const refreshButton = document.getElementById("refreshButton");
+
+    // Escapa qualquer texto antes de inserir via innerHTML,
+    // prevenindo injeção de HTML/script vindo dos dados da API.
+    function escapeHtml(value) {
+      const div = document.createElement("div");
+      div.textContent = value === null || value === undefined ? "" : String(value);
+      return div.innerHTML;
+    }
+
+    function statusBadge(status) {
+      const normalized = (status || "").toLowerCase();
+      const isOk = normalized.includes("pouso") || normalized.includes("decol") || normalized.includes("confirm");
+      const cls = isOk ? "ok" : "warn";
+      return `<span class="badge ${cls}">${escapeHtml(status || "sem status")}</span>`;
+    }
+
+    async function fetchAirportsList() {
+      try {
+        const response = await fetch("data/airports.json");
+        return await response.json();
+      } catch (err) {
+        console.error("Falha ao carregar data/airports.json", err);
+        return [];
+      }
+    }
+
+    async function fetchFlights(icao) {
+      let url = `${SUPABASE_URL}/rest/v1/flights?select=*&order=scheduled_departure.asc.nullslast`;
+      if (icao) {
+        url += `&icao=eq.${encodeURIComponent(icao)}`;
+      }
+      const response = await fetch(url, {
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`Supabase respondeu ${response.status}`);
+      }
+      return await response.json();
+    }
+
+    function renderFlights(flights) {
+      bodyEl.innerHTML = "";
+
+      if (!flights || flights.length === 0) {
+        bodyEl.innerHTML = `<tr><td colspan="6" class="empty">Nenhum voo encontrado.</td></tr>`;
+        return;
+      }
+
+      const rowsHtml = flights
+        .map((flight) => {
+          return `<tr>
+            <td>${escapeHtml(flight.flight_number)}</td>
+            <td>${escapeHtml(flight.airline)}</td>
+            <td>${escapeHtml(flight.origin_icao)}</td>
+            <td>${escapeHtml(flight.destination_icao)}</td>
+            <td>${statusBadge(flight.status)}</td>
+            <td>${escapeHtml(flight.aircraft_type)}</td>
+          </tr>`;
+        })
+        .join("");
+
+      bodyEl.innerHTML = rowsHtml;
+    }
+
+    async function loadAndRender() {
+      statusEl.textContent = "Carregando...";
+      try {
+        const icao = filterEl.value;
+        const flights = await fetchFlights(icao);
+        renderFlights(flights);
+        const now = new Date().toLocaleTimeString("pt-BR");
+        statusEl.textContent = `${flights.length} voo(s) — atualizado às ${now}`;
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Erro ao carregar os voos. Verifique SUPABASE_URL/SUPABASE_ANON_KEY.";
+      }
+    }
+
+    async function init() {
+      const airports = await fetchAirportsList();
+      airports.forEach((airport) => {
+        const option = document.createElement("option");
+        option.value = airport.icao;
+        option.textContent = `${airport.icao} — ${airport.nome}`;
+        filterEl.appendChild(option);
+      });
+
+      filterEl.addEventListener("change", loadAndRender);
+      refreshButton.addEventListener("click", loadAndRender);
+
+      await loadAndRender();
+    }
+
+    init();
+  </script>
+</body>
+</html>

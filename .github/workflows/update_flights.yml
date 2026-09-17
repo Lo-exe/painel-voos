@@ -1,0 +1,69 @@
+name: Atualizar voos e publicar painel
+
+on:
+  schedule:
+    # A cada 30 minutos
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+
+# Permissões mínimas necessárias: ler o repositório e publicar no GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Evita que duas execuções do workflow rodem ao mesmo tempo e conflitem
+# na escrita do Supabase / publicação do Pages
+concurrency:
+  group: "update-flights"
+  cancel-in-progress: true
+
+jobs:
+  fetch-and-insert:
+    name: Buscar voos na API SIROS e inserir no Supabase
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install requests
+
+      - name: Rodar fetch_flights.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          AIRPORTS: ${{ vars.AIRPORTS }}
+        run: python scripts/fetch_flights.py
+
+  deploy-pages:
+    name: Publicar painel no GitHub Pages
+    needs: fetch-and-insert
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Empacotar artefato do Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - name: Publicar no GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

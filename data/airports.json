@@ -1,0 +1,10 @@
+[
+  { "icao": "SBCA", "iata": "CAC", "nome": "Cascavel", "uf": "PR" },
+  { "icao": "SBCT", "iata": "CWB", "nome": "Afonso Pena (Curitiba)", "uf": "PR" },
+  { "icao": "SBGR", "iata": "GRU", "nome": "Guarulhos", "uf": "SP" },
+  { "icao": "SBSP", "iata": "CGH", "nome": "Congonhas", "uf": "SP" },
+  { "icao": "SBGL", "iata": "GIG", "nome": "Galeão (Rio de Janeiro)", "uf": "RJ" },
+  { "icao": "SBBR", "iata": "BSB", "nome": "Brasília", "uf": "DF" },
+  { "icao": "SBFL", "iata": "FLN", "nome": "Florianópolis", "uf": "SC" },
+  { "icao": "SBPA", "iata": "POA", "nome": "Salgado Filho (Porto Alegre)", "uf": "RS" }
+]
