@@ -23,7 +23,7 @@ Uso local:
 import json
 import os
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 
 import requests
 
@@ -49,19 +49,45 @@ def fetch_flights_from_siros(reference_date: str) -> list:
     """Busca todos os voos do dia na API SIROS/ANAC."""
     url = f"{SIROS_BASE_URL}/voos"
     params = {"dataReferencia": reference_date}
+    # Alguns WAFs/CDNs de APIs públicas (a SIROS roda atrás de Cloudflare)
+    # filtram requisições com o User-Agent padrão do requests
+    # ("python-requests/x.x"), especialmente vindas de IPs de datacenter
+    # como os runners do GitHub Actions, retornando 200 OK com corpo vazio
+    # em vez de um erro explícito. Um User-Agent de navegador evita isso.
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+    }
 
     try:
-        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
+        response = requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
     except requests.RequestException as exc:
         print(f"ERRO: falha ao consultar a API SIROS: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    print(f"Diagnóstico: status={response.status_code}, tamanho_resposta={len(response.text)} bytes")
+
     try:
         payload = response.json()
     except ValueError as exc:
         print(f"ERRO: resposta da API SIROS não é um JSON válido: {exc}", file=sys.stderr)
+        print(f"Diagnóstico: primeiros 300 caracteres da resposta: {response.text[:300]!r}", file=sys.stderr)
         sys.exit(1)
+
+    # A API SIROS devolve o corpo como uma STRING contendo JSON (JSON
+    # duplamente codificado), não como uma lista/dict direto. Se o primeiro
+    # response.json() já desserializou para uma string, fazemos um segundo
+    # json.loads() nela para chegar na lista de voos de verdade.
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (ValueError, TypeError) as exc:
+            print(f"ERRO: não foi possível decodificar o JSON aninhado da API SIROS: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     # A API pode retornar a lista diretamente ou dentro de uma chave "data"/"voos"
     if isinstance(payload, list):
@@ -70,6 +96,7 @@ def fetch_flights_from_siros(reference_date: str) -> list:
         for key in ("data", "voos", "registros"):
             if key in payload and isinstance(payload[key], list):
                 return payload[key]
+    print(f"Diagnóstico: formato de payload inesperado após decodificação: {type(payload)}")
     return []
 
 
@@ -106,6 +133,21 @@ def deduplicar_voos(flights: list) -> list:
     return unique_flights
 
 
+def parse_siros_datetime(value):
+    """Converte 'DD/MM/AAAA HH:MM' (formato da API SIROS, em UTC) para ISO 8601.
+
+    Retorna None se o valor estiver ausente ou em formato inesperado, em vez
+    de falhar o script inteiro por causa de um único voo com data estranha.
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.strptime(str(value).strip(), "%d/%m/%Y %H:%M")
+        return parsed.replace(tzinfo=timezone.utc).isoformat()
+    except ValueError:
+        return None
+
+
 def to_supabase_rows(flights: list, reference_date_iso: str) -> list:
     """Converte os registros da API SIROS para o formato da tabela `flights`."""
     rows = []
@@ -118,13 +160,21 @@ def to_supabase_rows(flights: list, reference_date_iso: str) -> list:
             {
                 "icao": reference_icao,
                 "flight_number": str(flight.get("nr_voo") or flight.get("numero_voo") or ""),
-                "airline": flight.get("nm_empresa") or flight.get("empresa") or None,
+                # A API SIROS não traz nome de companhia, só o código ICAO dela
+                "airline": flight.get("sg_empresa_icao") or flight.get("nm_empresa") or None,
                 "origin_icao": str(origin).upper() or None,
                 "destination_icao": str(destination).upper() or None,
-                "scheduled_departure": flight.get("dt_partida_prevista") or None,
-                "scheduled_arrival": flight.get("dt_chegada_prevista") or None,
-                "status": flight.get("situacao_voo") or flight.get("status") or None,
-                "aircraft_type": flight.get("tp_aeronave") or flight.get("aeronave") or None,
+                # Campos reais da API vêm com sufixo _utc, no formato DD/MM/AAAA HH:MM
+                "scheduled_departure": parse_siros_datetime(
+                    flight.get("dt_partida_prevista_utc") or flight.get("dt_partida_prevista")
+                ),
+                "scheduled_arrival": parse_siros_datetime(
+                    flight.get("dt_chegada_prevista_utc") or flight.get("dt_chegada_prevista")
+                ),
+                # A API não expõe status de voo em tempo real; usamos o tipo de
+                # serviço (ex.: "REGULAR DE PASSAGEIROS DOMÉSTICA") como aproximação
+                "status": flight.get("ds_tipo_servico") or flight.get("situacao_voo") or flight.get("status") or None,
+                "aircraft_type": flight.get("sg_equipamento_icao") or flight.get("tp_aeronave") or flight.get("aeronave") or None,
                 "reference_date": reference_date_iso,
             }
         )
