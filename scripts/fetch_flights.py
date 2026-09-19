@@ -187,7 +187,15 @@ def send_to_supabase(rows: list, supabase_url: str, service_key: str) -> None:
         print("Nenhum voo para enviar após filtro/deduplicação.")
         return
 
-    endpoint = f"{supabase_url.rstrip('/')}/rest/v1/flights"
+    # A PK da tabela e `id` (UUID gerado automaticamente), entao o upsert
+    # precisa dizer explicitamente qual constraint usar para detectar
+    # conflito -- senao o PostgREST tenta resolver pela PK (que nunca colide,
+    # ja que e sempre um UUID novo) e um INSERT simples acaba violando a
+    # constraint uq_flight_dedupe (icao, flight_number, reference_date).
+    endpoint = (
+        f"{supabase_url.rstrip('/')}/rest/v1/flights"
+        "?on_conflict=icao,flight_number,reference_date"
+    )
     headers = {
         "apikey": service_key,
         "Authorization": f"Bearer {service_key}",
