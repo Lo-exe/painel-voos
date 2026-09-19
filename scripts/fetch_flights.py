@@ -113,19 +113,21 @@ def filter_by_airports(flights: list, airports: list) -> list:
 
 
 def deduplicar_voos(flights: list) -> list:
-    """Remove voos duplicados com base em (numero_voo, origem, destino).
+    """Remove voos duplicados com base em (companhia, numero_voo, etapa).
 
-    A própria API SIROS pode repetir o mesmo voo em registros diferentes
-    (ex.: atualização de status). Mantemos apenas a primeira ocorrência
-    de cada combinação para evitar violar a constraint UNIQUE do banco.
+    O número do voo sozinho NÃO identifica um voo de forma única: companhias
+    diferentes reutilizam os mesmos números, e um voo com escala usa o mesmo
+    número em cada etapa (nr_etapa). Por isso a chave de deduplicação usa
+    companhia + número + etapa — a mesma combinação da constraint UNIQUE do
+    banco (uq_flight_dedupe), para nunca violar o upsert.
     """
     seen = set()
     unique_flights = []
     for flight in flights:
+        airline = flight.get("sg_empresa_icao") or flight.get("nm_empresa") or ""
         flight_number = flight.get("nr_voo") or flight.get("numero_voo") or ""
-        origin = flight.get("sg_icao_origem") or flight.get("origem_icao") or ""
-        destination = flight.get("sg_icao_destino") or flight.get("destino_icao") or ""
-        dedupe_key = (str(flight_number).strip(), str(origin).strip(), str(destination).strip())
+        leg_number = flight.get("nr_etapa") or ""
+        dedupe_key = (str(airline).strip(), str(flight_number).strip(), str(leg_number).strip())
         if dedupe_key in seen:
             continue
         seen.add(dedupe_key)
@@ -162,6 +164,9 @@ def to_supabase_rows(flights: list, reference_date_iso: str) -> list:
                 "flight_number": str(flight.get("nr_voo") or flight.get("numero_voo") or ""),
                 # A API SIROS não traz nome de companhia, só o código ICAO dela
                 "airline": flight.get("sg_empresa_icao") or flight.get("nm_empresa") or None,
+                # Etapa/escala do voo — necessária para identificar de forma única
+                # um voo com o mesmo número em trechos diferentes no mesmo dia
+                "leg_number": str(flight.get("nr_etapa") or "") or None,
                 "origin_icao": str(origin).upper() or None,
                 "destination_icao": str(destination).upper() or None,
                 # Campos reais da API vêm com sufixo _utc, no formato DD/MM/AAAA HH:MM
@@ -187,20 +192,19 @@ def send_to_supabase(rows: list, supabase_url: str, service_key: str) -> None:
         print("Nenhum voo para enviar após filtro/deduplicação.")
         return
 
-    # A PK da tabela e `id` (UUID gerado automaticamente), entao o upsert
+    # A PK da tabela é `id` (UUID gerado automaticamente), então o upsert
     # precisa dizer explicitamente qual constraint usar para detectar
-    # conflito -- senao o PostgREST tenta resolver pela PK (que nunca colide,
-    # ja que e sempre um UUID novo) e um INSERT simples acaba violando a
-    # constraint uq_flight_dedupe (icao, flight_number, reference_date).
+    # conflito — senão o PostgREST tenta resolver pela PK (que nunca colide,
+    # já que é sempre um UUID novo) e um INSERT simples acaba violando a
+    # constraint uq_flight_dedupe.
     endpoint = (
         f"{supabase_url.rstrip('/')}/rest/v1/flights"
-        "?on_conflict=icao,flight_number,reference_date"
+        "?on_conflict=airline,flight_number,leg_number,reference_date"
     )
     headers = {
         "apikey": service_key,
         "Authorization": f"Bearer {service_key}",
         "Content-Type": "application/json",
-        # upsert baseado na constraint uq_flight_dedupe (icao, flight_number, reference_date)
         "Prefer": "resolution=merge-duplicates,return=minimal",
     }
 
